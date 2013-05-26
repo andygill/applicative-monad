@@ -9,47 +9,49 @@ module Control.Applicative.Monad (
 
 import Control.Applicative
 import Data.Typeable
+import Data.Maybe
 
 -- | Abstract transformer from Applicative Functor to Monad
-data AppM :: (* -> *) -> * -> * where
-  Return  :: a -> AppM f a
-  Bind    :: (Typeable a) => f (C a) -> (C a -> AppM f b) -> AppM f b
+data AppM :: * -> (* -> *) -> * -> * where
+  Return  :: a -> AppM s f a
+  Bind    :: (Typeable a) => f (C s a) -> (C s a -> AppM s f b) -> AppM s f b
 
-instance Monad (AppM f) where
+instance Monad (AppM s f) where
   return = Return
   Return a >>= k = k a
   Bind m0 k0 >>= k = Bind m0 (\ a -> k0 a >>= k)
 
--- | A way of running an Applicative as a Monad
-runAppM :: (Typeable a, Applicative f) => AppM f (C a) -> f a
-runAppM = fmap runC . runAppM' 0
+-- | A way of running an Applicative as a Monad. Uses the rank-2 trick to make this sound.
 
-runAppM' :: (Typeable a, Applicative f) => Int -> AppM f (C a) -> f (C a)
+runAppM :: (Typeable a, Applicative f) => (forall s . AppM s f (C s a)) -> f a
+runAppM m = fmap runC (runAppM' 0 m)
+
+runAppM' :: (Typeable a, Applicative f) => Int -> AppM s f (C s a) -> f (C s a)
 runAppM' n (Return a) = pure a
 runAppM' n (Bind m k) = pure (flip ($)) <*> m <*> fmap (subst n) (runAppM' (n+1) (k (S n)))
 
 -- | Inject an Applicative computation into the Monad.
-liftAppM :: (Typeable a, Functor f) => f a -> AppM f (C a)
-liftAppM app = Bind (fmap C app) Return
+liftAppM :: (Typeable a, Functor f) => f a -> AppM s f (C s a)
+liftAppM app = Bind (fmap pure app) Return
 
 -------------------------------------------------------------------
 
-runC :: C a -> a
+runC :: C s a -> a
 runC (C a) = a
 runC (S {}) = error "symbol in evaluation"
 runC (A f a) = runC f $ runC a
 
 -- | Abstract Container for results from computation
-data C :: * -> * where
-        C :: a                                  -> C a            -- value
-        S :: (Typeable a) => Int                -> C a            -- symbol
-        A :: (Typeable a) => C (a -> b) -> C a  -> C b
+data C :: * -> * -> * where
+        C :: a                                      -> C s a            -- value
+        S :: (Typeable a) => Int                    -> C s a            -- symbol
+        A :: (Typeable a) => C s (a -> b) -> C s a  -> C s b
   deriving (Typeable)
 
-instance Functor C where
+instance Functor (C s) where
   fmap f c = pure f <*> c
 
-instance Applicative (C) where
+instance Applicative (C s) where
   pure a = C a
   C f <*> C a = C (f a)
   n <*> C a = C (\ g -> g a) <*> n
@@ -57,61 +59,14 @@ instance Applicative (C) where
   n1 <*> S n     = A n1 (S n)
 --  C f
 
--- Could use a deep embedding of Subst, and do these at one time.
+castC :: (Typeable a, Typeable b) => C s a -> C s b
+castC = fmap (fromMaybe (error "bad subst") . cast)
 
-subst :: (Typeable a, Typeable b) => Int -> C b -> (C a -> C b)
+-- Could use a deep embedding of Subst, and do these at one time.
+subst :: (Typeable a, Typeable b) => Int -> C s b -> (C s a -> C s b)
 subst n (C a)  = const $ C a
-subst n (S n') | n == n'   = \ a -> case cast a of
-                                      Nothing -> error "bad subst"
-                                      Just a' -> a'
+subst n (S n') | n == n'   = \ a -> castC a
                | otherwise = const $ S n'
 subst n (A c1 c2) = \ a -> subst n c1 a <*> subst n c2 a
 
 -------------------------------------------------------------------
-
-parseCharM :: AppM App (C Char)
-parseCharM = liftAppM parseChar
-
---exampleM :: AppM App (C (Char,Char))
-exampleM = do
-        c1 <- parseCharM
-        parseCharM
-        c2 <- parseCharM
-        return (pure (,) <*> c1 <*> c2)
-
----------------------------------------------------------------------
--- Fake App
-
-data App a where
-  Pure :: a -> App a
-  App :: App (a -> b) -> App a -> App b
-  ParseChar :: App Char
-
-instance Show (App a) where
-   show (Pure _) = "pure *"
-   show (App a1 a2) = "(" ++ show a1 ++ ")<*>(" ++ show a2 ++")"
-   show ParseChar = "parseChar"
-
-instance Applicative App where
-  pure = Pure
-  (<*>) = App
-
-instance Functor App where
-  fmap f a = pure f <*> a
-
-parseChar :: App Char
-parseChar = ParseChar
-
-exampleA :: App (Char,Char)
-exampleA = pure (,) <*> parseChar <*> parseChar
-
-runApp :: App a -> String -> (a,String)
-runApp (Pure a) str = (a,str)
-runApp (App f a) str0 = (f' a', str2)
-   where
-           (f',str1) = runApp f str0
-           (a',str2) = runApp a str1
-runApp (ParseChar) (c:cs) = (c,cs)
-
--------------------------------------------------------------------
-
